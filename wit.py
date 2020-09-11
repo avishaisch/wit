@@ -16,9 +16,27 @@ def make_dir(dir_name):
         os.mkdir(dir_name)
 
 
+def write_activated_file(wit_dir, branch_name):
+    file_name = wit_dir + '\\activated.txt'
+    with open(file_name, 'w') as file1:
+        file1.write(f'{branch_name}\n')
+
+
+def get_activated_branch(wit_dir):
+    file_name = wit_dir + '\\activated.txt'
+    try:
+        with open(file_name, 'r') as file1:
+            line = file1.readline()
+            return line[: -1]
+    except FileNotFoundError:
+        print('\nactivated.txt file does not exist - aborting')
+        sys.exit(1)
+
+
 def init():
     for dir_to_create in ('.wit', '.wit\\images', '.wit\\staging_area'):
         make_dir(dir_to_create)
+    write_activated_file('.wit', 'master')
 
 
 def find_wit_directory():
@@ -30,9 +48,9 @@ def find_wit_directory():
             relative_path = directory[i + 1:] + '\\' + relative_path
             directory = directory[0: i]
         else:
-            print('\n".wit" directory is not found - aborting')
+            print('\n".wit" directory does not exist - aborting')
             sys.exit(1)
-    return (directory, relative_path[:-1])
+    return directory, relative_path[:-1]
 
 
 def add(filename):
@@ -52,7 +70,7 @@ def add(filename):
                 shutil.rmtree(dest)
             shutil.copytree(src, dest, copy_function=shutil.copy)
     except FileNotFoundError:
-        print('\nFile doesn\'t exist - add function was ignored')
+        print(f'\nFile {filename} does not exist - add function was ignored')
 
 
 def are_dir_trees_equal(dir1, dir2):
@@ -82,16 +100,12 @@ def are_dir_trees_equal(dir1, dir2):
     return True
 
 
-def get_commit_id_from_references_file(references_file, including_master=False, abort_if_file_not_found=False, not_found_msg=None):
+def find_commit_id_for_branch(references_file, branch_name, abort_if_file_not_found=True, not_found_msg=f'\nreferences_file does not exist - aborting'):
     try:
         with open(references_file, 'r') as file1:
-            line = file1.readline()
-            head_commit_id = line[5: -1]
-            if including_master:
-                line = file1.readline()
-                master_commit_id = line[7: -1]
-                return head_commit_id, master_commit_id
-            return head_commit_id
+            for line in file1:
+                if line.split('=')[0] == branch_name:
+                    return line.split('=')[1].strip()
     except FileNotFoundError:
         if not_found_msg:
             print(not_found_msg)
@@ -99,6 +113,14 @@ def get_commit_id_from_references_file(references_file, including_master=False, 
             sys.exit(1)
         else:
             return None
+
+
+def get_commit_id_from_references_file(references_file, including_master=False, abort_if_file_not_found=False, not_found_msg=None):
+    head_commit_id = find_commit_id_for_branch(references_file, 'HEAD', abort_if_file_not_found, not_found_msg)
+    if including_master:
+        master_commit_id = find_commit_id_for_branch(references_file, 'master', abort_if_file_not_found, not_found_msg)
+        return head_commit_id, master_commit_id
+    return head_commit_id
 
 
 def set_wit_folders():
@@ -114,9 +136,28 @@ def generate_dir_name(valid_chars, length):
     return ''.join(random.choices(valid_chars, k=length))
 
 
-def write_to_references_file(references_file, head_commit_id, master_commit_id):
+def modify_branch_name_in_references_file(references_file, branch_name, head_commit_id=None):
+    found = False
+    if not head_commit_id:
+        head_commit_id = get_commit_id_from_references_file(references_file, False, True, '\nCommit was not done yet')
+    line_to_modify = branch_name + '=' + head_commit_id + '\n'
+    with open(references_file, 'r') as file1:
+        text = file1.read()
+        lines = text.split('\n')
     with open(references_file, 'w') as file1:
-        file1.write(f'HEAD={head_commit_id}\nmaster={master_commit_id}\n')
+        for i in range(0, len(lines) - 1):
+            if not lines[i].startswith(branch_name + '='):
+                file1.write(lines[i] + '\n')
+            else:
+                found = True
+                file1.write(line_to_modify)
+        if not found:
+            file1.write(line_to_modify)
+
+
+def create_references_file(references_file, commit_id):
+    with open(references_file, 'w') as file1:
+        file1.write(f'HEAD={commit_id}\nmaster={commit_id}\n')
 
 
 def commit(message):
@@ -128,6 +169,9 @@ def commit(message):
             print(f'\nThere is no need to perform commit - staging area is identical to last commit_id folder ({prev_commit_id}) - aborting')
             sys.exit(1)
     else:
+        if len(os.listdir(stage_folder)) == 0:
+            print(f'\nThere is no need to perform commit, staging area is empty - aborting')
+            sys.exit(1)
         prev_commit_id = 'None'  # First time only
 
     commit_id = generate_dir_name('1234567890abcdef', 40)
@@ -142,9 +186,13 @@ def commit(message):
         file1.write(f'parent={prev_commit_id}\ndate={current_time}\nmessage={message}\n')
 
     # Step 4: Updating the references.txt file
-    if master_commit_id == prev_commit_id:  # This condition was added to support checkout
-        master_commit_id = commit_id
-    write_to_references_file(references_file, commit_id, master_commit_id)
+    active_branch_name = get_activated_branch(wit_dir)
+    if os.path.exists(references_file):
+        modify_branch_name_in_references_file(references_file, 'HEAD', commit_id)
+        if find_commit_id_for_branch(references_file, active_branch_name) == prev_commit_id:  #  Active branch has same commit_id as Head so it should be updated too
+            modify_branch_name_in_references_file(references_file, active_branch_name)
+    else:
+        create_references_file(references_file, commit_id)
 
 
 def uncommited_changes(dir1, dir2, stage_folder, files, relative_path=''):
@@ -271,9 +319,14 @@ def ignore_function(home_dir, ignore):
 
 def checkout(commit_id):
     wit_dir, images_folder, stage_folder, references_file = set_wit_folders()
-    head_commit_id, master_commit_id = get_commit_id_from_references_file(references_file, True, True, '\nCommit was not done yet so checkout cannot be executed now')
-    if commit_id == 'master':
-        commit_id = master_commit_id
+    head_commit_id = get_commit_id_from_references_file(references_file, False, True, '\nCommit was not done yet so checkout cannot be executed now')
+    branch_name = commit_id
+    commit_id = find_commit_id_for_branch(references_file, branch_name)
+    if commit_id is None:  # This is a commit_id and not a branch
+        is_branch = False
+        commit_id = branch_name
+    else:  # This is a branch name and not a commit_id
+        is_branch = True
 
     commit_id_folder = images_folder + commit_id
     if not os.path.exists(commit_id_folder):
@@ -297,7 +350,9 @@ def checkout(commit_id):
     files = changes_not_staged(orig_dir + '\\', stage_folder, compare=False)
     shutil.copytree(commit_id_folder, orig_dir, ignore=ignore_function(commit_id_folder, files), dirs_exist_ok=True)
 
-    write_to_references_file(references_file, commit_id, master_commit_id)
+    modify_branch_name_in_references_file(references_file, 'HEAD', commit_id)
+    if is_branch:
+        write_activated_file(wit_dir, branch_name)
 
     shutil.rmtree(stage_folder)
     shutil.copytree(commit_id_folder, stage_folder, copy_function=shutil.copy)
@@ -337,6 +392,11 @@ def graph():
     g.view()
 
 
+def branch(branch_name):
+    wit_dir, images_folder, stage_folder, references_file = set_wit_folders()
+    modify_branch_name_in_references_file(references_file, branch_name)
+
+
 if len(sys.argv) < 2:
     print('\nNo parameters were given')
 elif sys.argv[1] == 'init':
@@ -367,5 +427,10 @@ elif sys.argv[1] == 'checkout':
         checkout(sys.argv[2])
 elif sys.argv[1] == 'graph':
     graph()
+elif sys.argv[1] == 'branch':
+    if len(sys.argv) < 3:
+        print('\nMissing branch name')
+    else:
+        branch(sys.argv[2])
 else:
     print('\nUnsupported function\n')
